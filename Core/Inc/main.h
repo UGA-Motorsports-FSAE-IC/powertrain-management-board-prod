@@ -40,7 +40,7 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 
-#define CAN_QUEUE_SIZE 300
+#define CAN_QUEUE_SIZE 100
 
 typedef struct {
   FDCAN_RxHeaderTypeDef rxheader;

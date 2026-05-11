@@ -122,6 +122,7 @@ uint32_t tps1 = 0;
 uint32_t tps2 = 0;
 uint32_t bs1 = 0;
 uint32_t bs2 = 0;
+/*
 volatile uint8_t downshift_commanded = 0;
 uint8_t set_throttle_to_0 = 0;
 uint32_t throttle_intended = 0;
@@ -137,6 +138,7 @@ uint32_t bse2_actuation = 0;
 uint8_t doing_downshift = 0;
 uint32_t throttle_flap_actuation = 0;
 volatile uint8_t allow_throttle_blip = 0;
+*/
 uint32_t gearpositionsensor = 0;
 uint32_t actualgear = 1;
 
@@ -144,15 +146,55 @@ FDCAN_FilterTypeDef canfilter;
 
 Canqueue canqueue = {0};
 
+Canqueue importantcanqueue = {0};
+
+volatile uint8_t shiftbool = 0;
+
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
   if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET) {
+    FDCAN_RxHeaderTypeDef tempHeader = {0};
+    uint8_t tempData[8] = {0}; 
+    HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &tempHeader, tempData);
 
-    uint8_t next = (canqueue.head + 1) % CAN_QUEUE_SIZE; 
+    uint8_t importantframe = 0;
+    if (tempHeader.Identifier == 10) {
+      shiftbool = 1;
+    }
+    switch (tempHeader.Identifier) {
+      case 1:
+        importantframe = 1;
+        break;
+      default:
+        break;
+    }
+    if (importantframe) {
+      uint8_t nextimportant = (importantcanqueue.head + 1) % CAN_QUEUE_SIZE;
+      if (nextimportant != importantcanqueue.tail) {
+        importantcanqueue.messagequeue[nextimportant].rxheader = tempHeader;
+        memcpy(importantcanqueue.messagequeue[nextimportant].canrxdata, tempData, sizeof(tempData));
+        importantcanqueue.head = nextimportant;
+      }         
+    } else {
+      uint8_t next = (canqueue.head + 1) % CAN_QUEUE_SIZE; 
+      if (next != canqueue.tail) {
+        canqueue.messagequeue[next].rxheader = tempHeader;
+        memcpy(canqueue.messagequeue[next].canrxdata, tempData, sizeof(tempData));
+        canqueue.head = next;
+      }   
+    }
+  }
+}
 
-    if (next != canqueue.tail) {
-      HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &(canqueue.messagequeue[next].rxheader), canqueue.messagequeue[next].canrxdata);
-      canqueue.head = next;
-    }   
+void add_message_to_queue(FDCAN_TxHeaderTypeDef * header, uint8_t * datatosend) {
+  while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0) {
+    continue;
+  }
+  
+  uint32_t errormessage = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, header, (const uint8_t *)datatosend);
+  if (errormessage != HAL_OK) {
+    char buffer[40] = {0};
+    sprintf(buffer, "message send fail, error code %lu", errormessage);
+    customprint(buffer);
   }
 }
 
@@ -287,14 +329,54 @@ int sendshiftcut() {
 
 FDCAN_TxHeaderTypeDef txheader6;
 uint8_t ackframe[8] = {0};
-uint8_t currentuniqueid = 0;
+uint8_t currentuniqueid = 1;
 
 HAL_StatusTypeDef sendshiftacknowledgement(int uniqueid) {
 
   ackframe[1] = uniqueid;
 
-  return HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txheader6, ackframe);
+
+    add_message_to_queue(&txheader6, ackframe);
 }
+
+void doshift() {
+  uint8_t uniqueid = (importantcanqueue.messagequeue[importantcanqueue.tail].canrxdata)[1];
+  uint8_t shiftcommand = (importantcanqueue.messagequeue[importantcanqueue.tail].canrxdata)[0];
+
+  char idbuffer[40] = {0};
+  sprintf(idbuffer, "the id was %lu, uniqueid is %lu, currentuniqueid is %lu, direction is %u\n", importantcanqueue.messagequeue[canqueue.tail].rxheader.Identifier, uniqueid, currentuniqueid, shiftcommand);
+  customprint(idbuffer);
+
+  if (0) { //uniqueid < currentuniqueid
+    char uniqueidbuffer[40] = {0};
+    sprintf(uniqueidbuffer, "already shifted\n");            
+    customprint(uniqueidbuffer);
+  } else {
+    customprint("shifting the gears\n");
+
+
+    if (shiftcommand == 1) { //downshift
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET); //downshift
+      HAL_Delay(80);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET); //downshift      
+
+    } else {
+
+      int sendresult = sendshiftcut();
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET); //upshift  
+      HAL_Delay(80);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET); //upshift  
+
+      //HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_6); //upshift  
+    }
+
+    currentuniqueid = uniqueid + 1;
+  }
+
+  //sendshiftacknowledgement(uniqueid);
+}
+
+
 
 
 
@@ -306,15 +388,6 @@ HAL_StatusTypeDef sendshiftacknowledgement(int uniqueid) {
   */
 int main(void)
 {
-
-  txheader6.Identifier = 10;
-  txheader6.IdType = FDCAN_EXTENDED_ID;
-  txheader6.TxFrameType = FDCAN_DATA_FRAME;
-  txheader6.DataLength = FDCAN_DLC_BYTES_8;
-  txheader6.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-  txheader6.BitRateSwitch = FDCAN_BRS_OFF;
-  txheader6.FDFormat = FDCAN_CLASSIC_CAN;
-  txheader6.MessageMarker = 0;
 
   /* USER CODE BEGIN 1 */
 
@@ -387,7 +460,7 @@ int main(void)
   HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
 
 
-  txheader6.Identifier = 166473;
+  txheader6.Identifier = 50;
   txheader6.IdType = FDCAN_EXTENDED_ID;
   txheader6.TxFrameType = FDCAN_DATA_FRAME;
   txheader6.DataLength = FDCAN_DLC_BYTES_8;
@@ -427,59 +500,42 @@ int main(void)
 
   HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, GPIO_PIN_RESET); //pololu direction
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET); //throttle relay
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET); //shutdown;
 
-  
+
 
   while (1)
   {
 
     loopcounter++;
 
-    /*
-    if (useapps) { 
-      if (set_throttle_to_0) {
-        targetvalue = 680;
-      } else {
-        targetvalue = (73 * apps2 / 33) - 4279;
-      }
+    if (shiftbool) {
+      customprint("did a shift\n");
+      //doshift();
+      shiftbool = 0;
     }
 
-    if (set_throttle_to_0) {
-      targetvalue = 680;
-    }
+    if (importantcanqueue.tail != importantcanqueue.head) {
+      uint16_t * importantrxdata = importantcanqueue.messagequeue[importantcanqueue.tail].canrxdata;
+      uint16_t importantheader = importantcanqueue.messagequeue[importantcanqueue.tail].rxheader.Identifier;
 
-    if (dopid) {
-      if ((loopcounter % 1000) == 0) {
-        int value = pid_output_value();
-        if (set_throttle_to_0) {
-          if (safetyprint) {
-            customprint("throttle is set to 0\n");
-          }
-        }
-        if (value < 0) {
-          HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, GPIO_PIN_SET); //pololu direction reverse
-          TIM2->CCR1 = (value * -1);
-        } else {
-          HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1, GPIO_PIN_RESET); //pololu direction forward
-          TIM2->CCR1 = value;
-        }
-        
-        if (printpid) {
-          char pidbuffer[40] = {0};
-          sprintf(pidbuffer, "pid set to %d, intended is %u, actual is %u\np: %u, i: %u, d: %u, pr: %u, ir: %u, dr: %u\n", value, targetvalue, tps1, gp, gi, gd, gpr, gir, gdr);
-          HAL_UART_Transmit(&huart1, pidbuffer, strlen(pidbuffer), 100);
-        }
+      switch (importantheader) {
+        case 10:
+          customprint("did a shift\n");
+          doshift();
+          break;
+        default:
+          break;
       }
+      customprint("got an important command");
+
+      importantcanqueue.tail = (importantcanqueue.tail + 1) % CAN_QUEUE_SIZE;
     }
-    */
 
     if (canqueue.tail != canqueue.head) {
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, __HAL_TIM_GET_COUNTER(&htim1) - 10);
+      //__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, __HAL_TIM_GET_COUNTER(&htim1) - 10);
       canframe_missing = 0;
       
-      char idbuffer[40] = {0};
-      sprintf("the id was %u\n", canqueue.messagequeue[canqueue.tail].rxheader.Identifier);
-      customprint(idbuffer);
       switch (canqueue.messagequeue[canqueue.tail].rxheader.Identifier) {
         case 210:
           apps1 = ((uint16_t *)(canqueue.messagequeue[canqueue.tail].canrxdata))[0];
@@ -496,38 +552,16 @@ int main(void)
           bs2 = ((uint16_t *)(canqueue.messagequeue[canqueue.tail].canrxdata))[3];
           sensorflags |= 0b00100000;
           break;
-        case 10:
-          uint8_t uniqueid = (canqueue.messagequeue[canqueue.tail].canrxdata)[1];
-          uint8_t shiftcommand = (canqueue.messagequeue[canqueue.tail].canrxdata)[0];
-
-          if (uniqueid <= currentuniqueid) {
-            char uniqueidbuffer[40] = {0};
-            sprintf(uniqueidbuffer, "the uniqueid is %u, currentuniqueid is %u\n", uniqueid, currentuniqueid);            
-            customprint(uniqueidbuffer);
-          } else {
-            customprint("shifting the gears\n");
-            if (shiftcommand == 1 && actualgear > 1) { //downshift
-              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET); //downshift
-              HAL_Delay(80);
-              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET); //downshift
-            }
-
-            if (shiftcommand == 2 && actualgear < 6) {
-              int sendresult = sendshiftcut();
-              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET); //upshift  
-              HAL_Delay(80);
-              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET); //upshift  
-            }
-            
-            currentuniqueid++;
-          }
-
-          sendshiftacknowledgement(uniqueid);
-          break;
+        case 213:
+          gearpositionsensor = ((uint16_t *)(canqueue.messagequeue[canqueue.tail].canrxdata))[1];
+          actualgear = gearpositionsensor / 10;
+          cantxdata[0] = actualgear;
+          add_message_to_queue(&txheader6, cantxdata);
+          break;  
         default:
-          char otherbuffer[40] = {0};
-          sprintf(otherbuffer, "recieved can message %u\n", canqueue.messagequeue[canqueue.tail].rxheader.Identifier);
-          HAL_UART_Transmit(&huart1, otherbuffer, strlen(otherbuffer), 100);
+          //char otherbuffer[40] = {0};
+          //sprintf(otherbuffer, "recieved can message %u\n", canqueue.messagequeue[canqueue.tail].rxheader.Identifier);
+          //HAL_UART_Transmit(&huart1, otherbuffer, strlen(otherbuffer), 100);
           break;
       }
 
@@ -536,20 +570,16 @@ int main(void)
       if (printcan) {
         if ((loopcounter % 100000) == 0) {
           //HAL_UART_Transmit(&huart1, finalbuffer, strlen(finalbuffer), 100);
-          if (sensorflags == 0b00111111) {
-            char sensorbuffer[600] = {0};
-            sprintf(sensorbuffer, "apps1: %u\napps2: %u\ntps1: %u\ntps2: %u\nbs1: %u\nbs2: %u\n\n", apps1, apps2, tps1, tps2, bs1, bs2);
-            HAL_UART_Transmit(&huart1, sensorbuffer, strlen(sensorbuffer), 100);
-            sensorflags = 0x00000000;
-          } 
         }
         //HAL_UART_Transmit(&huart1, finalbuffer, strlen(finalbuffer), 100);
+        
         if (sensorflags == 0b00111111) {
           char sensorbuffer[600] = {0};
-          sprintf(sensorbuffer, "apps1: %u\napps2: %u\ntps1: %u\ntps2: %u\nbs1: %u\nbs2: %u\n\n", apps1, apps2, tps1, tps2, bs1, bs2);
+          sprintf(sensorbuffer, "apps1: %u\napps2: %u\ntps1: %u\ntps2: %u\nbs1: %u\nbs2: %u\ngps: %u\n\n", apps1, apps2, tps1, tps2, bs1, bs2, gearpositionsensor);
           HAL_UART_Transmit(&huart1, sensorbuffer, strlen(sensorbuffer), 100);
           sensorflags = 0x00000000;
         }
+        
       }
       
     } else if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan1, FDCAN_RX_FIFO0) == 3) {
@@ -562,107 +592,19 @@ int main(void)
       canqueue.tail = 0;
     }
 
-
-
-    /*
-    if (ocdelayflag) {
-      customprint("the oc callback was called\n");
-      ocdelayflag = 0;
-    }
-
-    tps1_actuation = tps1;                //min value is 410, range is 3276
-    tps2_actuation = 3836 - tps2;         //min value is 410, range is 3276 //3384 - tps2
-    tps_difference = (abs(((int)tps1_actuation) - ((int)tps2_actuation)) * 1000) / 3200; //difference value will range from 0-1000, representing 0%-100%
-    if (tps1 < 3999 && tps2 < 3999 && tps1 > 100 && tps2 > 100 && tps_difference < 200) { //if both tps's have no short circuit or disconnection, and difference between them is less than 8%
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, __HAL_TIM_GET_COUNTER(&htim1) - 10); //then reset timer to 0 since there is no error with tps
-      tps_implausibility = 0;
-    } else if (safetyprint) {
-      customprint("tps implausibility\n");
-    }
-
-    apps1_actuation = (uint32_t)(((-9) * ((int)apps1) / 10) + 3830);            
-    apps2_actuation = apps2;                        
-    apps_difference = (abs(((int)apps1_actuation) - ((int)apps2_actuation)) * 1000) / 1300; //difference value will range from 0-1000, representing 0%-100%
-    if (apps1 < 3500 && apps2 < 3500  && apps1 > 100 && apps2 > 100 && apps_difference < 200) { //if both apps's have no short circuit or disconnection, and difference between them is less than 8%
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, __HAL_TIM_GET_COUNTER(&htim1) - 10); //then reset timer to 0 since there is no error with apps
-      apps_implausibility = 0;
-    } else if (safetyprint) {
-      customprint("apps implausibility\n");
-      char appsbuffer[40];
-      sprintf(appsbuffer, "safety: apps1: %u, apps2: %u\n", apps1, apps2);
-      HAL_UART_Transmit(&huart1, appsbuffer, strlen(appsbuffer), 100);
-    }
-
-    if (bs1 < 3999 && bs2 < 3999 && bs1 > 100 && bs2 > 100) { //if both bse's have no short circuit or disconnection
-      __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_5, __HAL_TIM_GET_COUNTER(&htim1) - 10); //then reset timer to 0 since there is no error with tps
-      bse_implausibility = 0;
-    } else if (safetyprint) {
-      customprint("bse implausibility\n");
-    }    
-
-    if (canframe_missing || tps_implausibility || apps_implausibility || bse_implausibility) {
-      //HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); //throttle pin
-      set_throttle_to_0 = 1;
-      if (safetyprint) {
-        customprint("throttle relay off\n");
-      }
-    }
-
-    uint8_t not_braking_and_throttle = !((bs1 < 901 && bs2 < 1556) && (tps1_actuation < 600 && tps2_actuation < 600)); //if either brake sensor measures hard braking, while either tps measures open throttle
-    uint8_t throttle_target_near_actual = (abs(((int16_t)tps1_actuation) - ((int16_t)targetvalue)) * 1000) / 3276 < 200; //if difference between desired value and intended throttle position is >8%
-
-    if (throttle_target_near_actual &&  not_braking_and_throttle) {
-      __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_1, __HAL_TIM_GET_COUNTER(&htim15) - 10); //throttle_return set to TRUE if this line not called
-
-      if (safe_to_enable_fuel_throttle) {
-        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET);
-        throttle_return = 0;
-        throttle_return_delay_passed = 0;
-      }
-    } else { 
-      __HAL_TIM_SET_COMPARE(&htim16, TIM_CHANNEL_1, __HAL_TIM_GET_COUNTER(&htim16) - 10); //safe_to_enable_fuel_throttle set to TRUE if this line not called
-    }
-
-    if (!not_braking_and_throttle) {
-      set_throttle_to_0 = 1;
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-    }
-    if (throttle_return) {
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET);
-      set_throttle_to_0 = 1;
-    } else {
-      __HAL_TIM_SET_COMPARE(&htim15, TIM_CHANNEL_2, __HAL_TIM_GET_COUNTER(&htim15) - 10); //throttle_return_delay_passed set to TRUE if this line not called
-    }
-
-    if (throttle_return_delay_passed) {
-      if (safetyprint) {
-        customprint("throttle return delay passe\n");
-      }
-      safe_to_enable_fuel_throttle = 0;
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_RESET);
-    }
-
-    if (throttle_target_near_actual && not_braking_and_throttle && !canframe_missing && !tps_implausibility && !apps_implausibility && !bse_implausibility) {
-      //only if throttle target is near intended, no simultaneous throttle and braking, and all sensors are recieved and working, then the throttle is allowed to be powered. 
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);
-      set_throttle_to_0 = 0;  
-    }
-    */
-
-
-
     if (gotcommand) {
-      HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txheader6, (uint8_t *)(cantxdata));
 
       HAL_UART_Transmit(&huart1, (uint8_t *)intbuffer, 40 - fulllen, 100); 
       char counterbuffer[40] = {0};
       sprintf(counterbuffer, "\nloop counter: %lu\n", loopcounter);
       HAL_UART_Transmit(&huart1, counterbuffer, strlen(counterbuffer), 100);
 
+
       if (!strcmp(intbuffer, "togglecanprint")) {
         printcan = !printcan;
       }
 
+      /*
       if (!strcmp(intbuffer, "togglepidprint")) {
         printpid = !printpid;
       }
@@ -761,6 +703,8 @@ int main(void)
         }
       }
 
+      */
+
       if (!strcmp(intbuffer, "led")) {
         HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
       }
@@ -834,8 +778,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV1;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -845,7 +791,7 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
@@ -920,9 +866,9 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 99;
+  htim1.Init.Prescaler = 60;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 38399;
+  htim1.Init.Period = 65535;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
@@ -1080,9 +1026,9 @@ static void MX_TIM15_Init(void)
 
   /* USER CODE END TIM15_Init 1 */
   htim15.Instance = TIM15;
-  htim15.Init.Prescaler = 999;
+  htim15.Init.Prescaler = 600;
   htim15.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim15.Init.Period = 38399;
+  htim15.Init.Period = 65535;
   htim15.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim15.Init.RepetitionCounter = 0;
   htim15.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
