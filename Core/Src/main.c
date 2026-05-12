@@ -36,21 +36,14 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
-#define MAX_FORWARD_POWER 1200
-#define MAX_BACKWARD_POWER -1200
-
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -59,14 +52,37 @@ COM_InitTypeDef BspCOMInit;
 
 FDCAN_HandleTypeDef hfdcan1;
 
-TIM_HandleTypeDef htim1;
-TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim15;
-TIM_HandleTypeDef htim16;
+TIM_HandleTypeDef htim17;
 
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
+
+
+uint32_t apps1 = 0;
+uint32_t apps2 = 0;
+
+uint32_t tps1 = 0;
+uint32_t tps2 = 0;
+
+uint32_t bs1 = 0;
+uint32_t bs2 = 0;
+
+uint32_t gearpositionsensor = 0;
+uint32_t actualgear = 1; //translation from gearpositionsensor variable
+
+FDCAN_FilterTypeDef canfilter;
+
+Canqueue canqueue = {0};
+
+Canqueue importantcanqueue = {0};
+
+volatile uint8_t shiftbool = 0;
+volatile uint8_t shift_direction = 0;
+
+volatile uint32_t cancounter = 0;
+
+uint8_t sensorflags = 0;
 
 /* USER CODE END PV */
 
@@ -75,10 +91,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_FDCAN1_Init(void);
 static void MX_USART1_UART_Init(void);
-static void MX_TIM2_Init(void);
-static void MX_TIM15_Init(void);
-static void MX_TIM16_Init(void);
-static void MX_TIM1_Init(void);
+static void MX_TIM17_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -94,7 +107,6 @@ char intbuffer[40] = {0};
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   intbuffer[40 - fulllen] = onebyte;
-
   if (onebyte == '!') {
     intbuffer[40 - fulllen] = '\0';
     gotcommand = 1;
@@ -106,67 +118,22 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   HAL_UART_Receive_IT(&huart1, &onebyte, 1);
 }
 
-volatile uint8_t do_start_piston_actuation = 0;
-volatile uint8_t canframe_missing = 0; //use tim1 channel 1  //ACTUALLY TIM2
-volatile uint8_t tps_implausibility = 0; //use tim1 channel 3
-volatile uint8_t apps_implausibility = 0; //use tim1 channel 4
-volatile uint8_t bse_implausibility = 0; //use tim1 channel 5
-volatile uint8_t throttle_return = 0;
-volatile uint8_t throttle_return_delay_passed = 0;
-volatile uint8_t throttle_stuck = 0; //use tim3 channel 1
-volatile uint8_t safe_to_enable_fuel_throttle = 0; //use tim3 channel 3
-volatile uint8_t maximum_shift_time_passed = 0;
-uint32_t apps1 = 0;
-uint32_t apps2 = 0;
-uint32_t tps1 = 0;
-uint32_t tps2 = 0;
-uint32_t bs1 = 0;
-uint32_t bs2 = 0;
-/*
-volatile uint8_t downshift_commanded = 0;
-uint8_t set_throttle_to_0 = 0;
-uint32_t throttle_intended = 0;
-uint32_t tps1_actuation = 0;
-uint32_t tps2_actuation = 0;
-uint32_t tps_difference = 0;
-uint32_t gps = 0;
-uint32_t apps1_actuation = 0;
-uint32_t apps2_actuation = 0;
-uint32_t apps_difference = 0;
-uint32_t bse1_actuation = 0;
-uint32_t bse2_actuation = 0;
-uint8_t doing_downshift = 0;
-uint32_t throttle_flap_actuation = 0;
-volatile uint8_t allow_throttle_blip = 0;
-*/
-uint32_t gearpositionsensor = 0;
-uint32_t actualgear = 1;
-
-FDCAN_FilterTypeDef canfilter;
-
-Canqueue canqueue = {0};
-
-Canqueue importantcanqueue = {0};
-
-volatile uint8_t shiftbool = 0;
-
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
+
+  cancounter += 1;
+
   if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != RESET) {
     FDCAN_RxHeaderTypeDef tempHeader = {0};
     uint8_t tempData[8] = {0}; 
+
     HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &tempHeader, tempData);
 
     uint8_t importantframe = 0;
     if (tempHeader.Identifier == 10) {
       shiftbool = 1;
+      shift_direction = tempData[0];
     }
-    switch (tempHeader.Identifier) {
-      case 1:
-        importantframe = 1;
-        break;
-      default:
-        break;
-    }
+
     if (importantframe) {
       uint8_t nextimportant = (importantcanqueue.head + 1) % CAN_QUEUE_SIZE;
       if (nextimportant != importantcanqueue.tail) {
@@ -217,8 +184,7 @@ int getcommand(uint8_t * buffer, int maxlen) {
 }
 
 
-uint8_t sensorflags = 0;
-
+/*
 int gp = 80;
 int gi = 20;
 int gd = 70;
@@ -315,13 +281,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
     maximum_shift_time_passed = 1;
   }
 }
+*/
 
 void customprint(const char * toprint) {
   HAL_UART_Transmit(&huart1, "safety:\t", strlen("safety\t"), 100);
   HAL_UART_Transmit(&huart1, (uint8_t *)toprint, strlen(toprint), 100);
 }
-
-
 
 int sendshiftcut() {
   return 0;
@@ -332,50 +297,46 @@ uint8_t ackframe[8] = {0};
 uint8_t currentuniqueid = 1;
 
 HAL_StatusTypeDef sendshiftacknowledgement(int uniqueid) {
-
   ackframe[1] = uniqueid;
-
-
-    add_message_to_queue(&txheader6, ackframe);
+  add_message_to_queue(&txheader6, ackframe);
 }
 
 void doshift() {
-  uint8_t uniqueid = (importantcanqueue.messagequeue[importantcanqueue.tail].canrxdata)[1];
-  uint8_t shiftcommand = (importantcanqueue.messagequeue[importantcanqueue.tail].canrxdata)[0];
-
-  char idbuffer[40] = {0};
-  sprintf(idbuffer, "the id was %lu, uniqueid is %lu, currentuniqueid is %lu, direction is %u\n", importantcanqueue.messagequeue[canqueue.tail].rxheader.Identifier, uniqueid, currentuniqueid, shiftcommand);
-  customprint(idbuffer);
-
-  if (0) { //uniqueid < currentuniqueid
-    char uniqueidbuffer[40] = {0};
-    sprintf(uniqueidbuffer, "already shifted\n");            
-    customprint(uniqueidbuffer);
-  } else {
-    customprint("shifting the gears\n");
-
-
-    if (shiftcommand == 1) { //downshift
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET); //downshift
-      HAL_Delay(80);
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET); //downshift      
-
-    } else {
-
-      int sendresult = sendshiftcut();
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET); //upshift  
-      HAL_Delay(80);
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET); //upshift  
-
-      //HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_6); //upshift  
-    }
-
-    currentuniqueid = uniqueid + 1;
+  switch (shift_direction) {
+    case 1:
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
+      HAL_Delay(150);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
+      break;
+    case 2:
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
+      HAL_Delay(150);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
+      break;
+    default:
+      customprint("error with direction\n");
+      break;
   }
-
-  //sendshiftacknowledgement(uniqueid);
 }
 
+/*
+uint16_t translatestep(uint16_t candidate, uint16_t * inputvalues, uint16_t * outputvalues, uint8_t steps) {
+  uint16_t current_min_delta = 65535;
+  uint16_t bestfitindex = 0;
+  for (int i = 0; i < steps; i++) {
+    if (abs(((int)inputvalues[i]) - ((int)candidate)) < current_min_delta) {
+      bestfitindex = i;
+    }
+  }
+  return outputvalues[bestfitindex];
+}
+
+uint16_t originalvalues[7] = {580, 860, 1140, 1710, 2260, 2800, 3489};
+uint16_t realvalues[7] = {1, 7, 2, 3, 4, 5};
+uint16_t translatedgps = 8;
+
+volatile uint8_t translate_and_send_sensor_values = 0;
+*/
 
 
 
@@ -413,12 +374,9 @@ int main(void)
   MX_GPIO_Init();
   MX_FDCAN1_Init();
   MX_USART1_UART_Init();
-  MX_TIM2_Init();
-  MX_TIM15_Init();
-  MX_TIM16_Init();
-  MX_TIM1_Init();
+  MX_TIM17_Init();
   /* USER CODE BEGIN 2 */
-  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
+  //HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   /* USER CODE END 2 */
 
   /* Initialize leds */
@@ -446,12 +404,14 @@ int main(void)
   FDCAN_TxHeaderTypeDef txheader6;
 
   char buffer[40] = {0};
-  TIM2->CCR1 = 100; 
 
-  HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_1);
-  HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_3);
-  HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_4);
-  HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_5);
+  //TIM2->CCR1 = 100; 
+
+  //HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_1);
+  //HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_3);
+  //HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_4);
+  //HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_5);
+  HAL_TIM_Base_Start_IT(&htim17);
   
   HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
   HAL_Delay(40);
@@ -478,7 +438,7 @@ int main(void)
   canfilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
   canfilter.FilterID1 = 0x000;
   canfilter.FilterID2 = 0x000;  
-
+    
   HAL_FDCAN_ConfigFilter(&hfdcan1, &canfilter);
 
   HAL_FDCAN_Start(&hfdcan1);
@@ -502,6 +462,16 @@ int main(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET); //throttle relay
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, GPIO_PIN_SET); //shutdown;
 
+  FDCAN_TxHeaderTypeDef txheader2;
+  txheader2.Identifier = 50;
+  txheader2.IdType = FDCAN_EXTENDED_ID;
+  txheader2.TxFrameType = FDCAN_DATA_FRAME;
+  txheader2.DataLength = FDCAN_DLC_BYTES_8;
+  txheader2.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+  txheader2.BitRateSwitch = FDCAN_BRS_OFF;
+  txheader2.FDFormat = FDCAN_CLASSIC_CAN;
+  txheader2.MessageMarker = 0;
+  uint8_t * txheader2data = {0};
 
 
   while (1)
@@ -509,34 +479,29 @@ int main(void)
 
     loopcounter++;
 
+    /*
+    if (translate_and_send_sensor_values) {
+      translatedgps = translatestep(gearpositionsensor, originalvalues, realvalues, sizeof(realvalues));
+      char gearbuffer[40] = {0};
+      txheader2data[0] = translatedgps;
+      sprintf(translatedgps, "the actual gear is %u", translatedgps);
+      customprint(gearbuffer);
+      add_message_to_queue(&txheader2, txheader2data);
+      translate_and_send_sensor_values = 0;
+    }
+      */
+
     if (shiftbool) {
       customprint("did a shift\n");
-      //doshift();
+      doshift();
       shiftbool = 0;
     }
 
-    if (importantcanqueue.tail != importantcanqueue.head) {
-      uint16_t * importantrxdata = importantcanqueue.messagequeue[importantcanqueue.tail].canrxdata;
-      uint16_t importantheader = importantcanqueue.messagequeue[importantcanqueue.tail].rxheader.Identifier;
+    if (canqueue.tail != canqueue.head) { //dequeue from normal queue
 
-      switch (importantheader) {
-        case 10:
-          customprint("did a shift\n");
-          doshift();
-          break;
-        default:
-          break;
-      }
-      customprint("got an important command");
+      uint32_t identifier = canqueue.messagequeue[canqueue.tail].rxheader.Identifier;
 
-      importantcanqueue.tail = (importantcanqueue.tail + 1) % CAN_QUEUE_SIZE;
-    }
-
-    if (canqueue.tail != canqueue.head) {
-      //__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, __HAL_TIM_GET_COUNTER(&htim1) - 10);
-      canframe_missing = 0;
-      
-      switch (canqueue.messagequeue[canqueue.tail].rxheader.Identifier) {
+      switch (identifier) {
         case 210:
           apps1 = ((uint16_t *)(canqueue.messagequeue[canqueue.tail].canrxdata))[0];
           sensorflags |= 0b00000001;
@@ -554,14 +519,7 @@ int main(void)
           break;
         case 213:
           gearpositionsensor = ((uint16_t *)(canqueue.messagequeue[canqueue.tail].canrxdata))[1];
-          actualgear = gearpositionsensor / 10;
-          cantxdata[0] = actualgear;
-          add_message_to_queue(&txheader6, cantxdata);
-          break;  
         default:
-          //char otherbuffer[40] = {0};
-          //sprintf(otherbuffer, "recieved can message %u\n", canqueue.messagequeue[canqueue.tail].rxheader.Identifier);
-          //HAL_UART_Transmit(&huart1, otherbuffer, strlen(otherbuffer), 100);
           break;
       }
 
@@ -596,7 +554,7 @@ int main(void)
 
       HAL_UART_Transmit(&huart1, (uint8_t *)intbuffer, 40 - fulllen, 100); 
       char counterbuffer[40] = {0};
-      sprintf(counterbuffer, "\nloop counter: %lu\n", loopcounter);
+      sprintf(counterbuffer, "\nloop counter: %lu, cancounter: %lu\n", loopcounter, cancounter);  
       HAL_UART_Transmit(&huart1, counterbuffer, strlen(counterbuffer), 100);
 
 
@@ -711,17 +669,25 @@ int main(void)
 
       if (!strcmp(intbuffer, "shift")) {
         int receivedbytes = getcommand((uint8_t *)buffer, 40);
-        if (!strcmp(buffer, "up")) {
+        if (!strcmp(buffer, "down")) {
+          shiftbool = 1;
+          shift_direction = 2;
+          /*
           HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET); //upshift  
           HAL_Delay(80);
           HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET); //upshift  
           HAL_UART_Transmit(&huart1, "shifted up\n", strlen("shifted up\n"), 100);          
-        } else if (!
-          strcmp(buffer, "down")) {
+          */
+          
+        } else if (!strcmp(buffer, "up")) {
+          shiftbool = 1;
+          shift_direction = 1;
+          /*
           HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET); //downshift
           HAL_Delay(80);
           HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET); //downshift
           HAL_UART_Transmit(&huart1, "shifted down\n", strlen("shifted down\n"), 100);
+          */
         }
       } 
       
@@ -734,7 +700,8 @@ int main(void)
         HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_1); //throttlebody
         HAL_UART_Transmit(&huart1, "toggled throttle\n", strlen("toggle throttle\n"), 100);
       }
-
+      
+      /*
       if (!strcmp(intbuffer, "dirchange")) {
         HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_1);
         HAL_UART_Transmit(&huart1, "changed direction\n", strlen("changed direction\n"), 100);
@@ -751,6 +718,8 @@ int main(void)
           HAL_UART_Transmit(&huart1, pwmbuffer, strlen(pwmbuffer), 100);
         }
       }
+      */
+
       memset(intbuffer, 0, fulllen);
       gotcommand = 0;
       fulllen = 40;
@@ -778,10 +747,8 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSIDiv = RCC_HSI_DIV1;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -791,7 +758,7 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
@@ -846,303 +813,34 @@ static void MX_FDCAN1_Init(void)
 }
 
 /**
-  * @brief TIM1 Initialization Function
+  * @brief TIM17 Initialization Function
   * @param None
   * @retval None
   */
-static void MX_TIM1_Init(void)
+static void MX_TIM17_Init(void)
 {
 
-  /* USER CODE BEGIN TIM1_Init 0 */
+  /* USER CODE BEGIN TIM17_Init 0 */
 
-  /* USER CODE END TIM1_Init 0 */
+  /* USER CODE END TIM17_Init 0 */
 
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+  /* USER CODE BEGIN TIM17_Init 1 */
 
-  /* USER CODE BEGIN TIM1_Init 1 */
-
-  /* USER CODE END TIM1_Init 1 */
-  htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 60;
-  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 65535;
-  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim1.Init.RepetitionCounter = 0;
-  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  /* USER CODE END TIM17_Init 1 */
+  htim17.Instance = TIM17;
+  htim17.Init.Prescaler = 7;
+  htim17.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim17.Init.Period = 65535;
+  htim17.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim17.Init.RepetitionCounter = 0;
+  htim17.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim17) != HAL_OK)
   {
     Error_Handler();
   }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_Init(&htim1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_5) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_6) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
-  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTimeConfig.BreakFilter = 0;
-  sBreakDeadTimeConfig.BreakAFMode = TIM_BREAK_AFMODE_INPUT;
-  sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
-  sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
-  sBreakDeadTimeConfig.Break2Filter = 0;
-  sBreakDeadTimeConfig.Break2AFMode = TIM_BREAK_AFMODE_INPUT;
-  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM1_Init 2 */
+  /* USER CODE BEGIN TIM17_Init 2 */
 
-  /* USER CODE END TIM1_Init 2 */
-
-}
-
-/**
-  * @brief TIM2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM2_Init(void)
-{
-
-  /* USER CODE BEGIN TIM2_Init 0 */
-
-  /* USER CODE END TIM2_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
-
-  /* USER CODE BEGIN TIM2_Init 1 */
-
-  /* USER CODE END TIM2_Init 1 */
-  htim2.Instance = TIM2;
-  htim2.Init.Prescaler = 0;
-  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 1999;
-  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_PWM_Init(&htim2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM2_Init 2 */
-
-  /* USER CODE END TIM2_Init 2 */
-  HAL_TIM_MspPostInit(&htim2);
-
-}
-
-/**
-  * @brief TIM15 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM15_Init(void)
-{
-
-  /* USER CODE BEGIN TIM15_Init 0 */
-
-  /* USER CODE END TIM15_Init 0 */
-
-  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
-  TIM_MasterConfigTypeDef sMasterConfig = {0};
-  TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
-
-  /* USER CODE BEGIN TIM15_Init 1 */
-
-  /* USER CODE END TIM15_Init 1 */
-  htim15.Instance = TIM15;
-  htim15.Init.Prescaler = 600;
-  htim15.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim15.Init.Period = 65535;
-  htim15.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim15.Init.RepetitionCounter = 0;
-  htim15.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim15) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  if (HAL_TIM_ConfigClockSource(&htim15, &sClockSourceConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_Init(&htim15) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
-  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  if (HAL_TIMEx_MasterConfigSynchronization(&htim15, &sMasterConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_OC_ConfigChannel(&htim15, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_ConfigChannel(&htim15, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
-  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTimeConfig.BreakFilter = 0;
-  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim15, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM15_Init 2 */
-
-  /* USER CODE END TIM15_Init 2 */
-
-}
-
-/**
-  * @brief TIM16 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_TIM16_Init(void)
-{
-
-  /* USER CODE BEGIN TIM16_Init 0 */
-
-  /* USER CODE END TIM16_Init 0 */
-
-  TIM_OC_InitTypeDef sConfigOC = {0};
-  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
-
-  /* USER CODE BEGIN TIM16_Init 1 */
-
-  /* USER CODE END TIM16_Init 1 */
-  htim16.Instance = TIM16;
-  htim16.Init.Prescaler = 999;
-  htim16.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim16.Init.Period = 65535;
-  htim16.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim16.Init.RepetitionCounter = 0;
-  htim16.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim16) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_TIM_OC_Init(&htim16) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sConfigOC.OCMode = TIM_OCMODE_TIMING;
-  sConfigOC.Pulse = 0;
-  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
-  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
-  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
-  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-  if (HAL_TIM_OC_ConfigChannel(&htim16, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
-  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
-  sBreakDeadTimeConfig.DeadTime = 0;
-  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
-  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
-  sBreakDeadTimeConfig.BreakFilter = 0;
-  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
-  if (HAL_TIMEx_ConfigBreakDeadTime(&htim16, &sBreakDeadTimeConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN TIM16_Init 2 */
-
-  /* USER CODE END TIM16_Init 2 */
+  /* USER CODE END TIM17_Init 2 */
 
 }
 
@@ -1221,6 +919,14 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(led_GPIO_Port, led_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PA0 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  GPIO_InitStruct.Alternate = GPIO_AF3_TIM2;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : throttlerelay_Pin upshift_Pin downshift_Pin shutdown_Pin */
   GPIO_InitStruct.Pin = throttlerelay_Pin|upshift_Pin|downshift_Pin|shutdown_Pin;

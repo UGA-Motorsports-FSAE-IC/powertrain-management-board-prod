@@ -40,7 +40,7 @@ extern "C" {
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
 
-#define CAN_QUEUE_SIZE 100
+#define CAN_QUEUE_SIZE 250
 
 typedef struct {
   FDCAN_RxHeaderTypeDef rxheader;
@@ -64,8 +64,6 @@ typedef struct {
 /* USER CODE BEGIN EM */
 
 /* USER CODE END EM */
-
-void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
