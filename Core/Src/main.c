@@ -40,6 +40,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+#define SHIFT_CAN_FRAME 172
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -77,8 +80,9 @@ Canqueue canqueue = {0};
 
 Canqueue importantcanqueue = {0};
 
-volatile uint8_t shiftbool = 0;
 volatile uint8_t shift_direction = 0;
+volatile uint8_t shiftcounter = 0; //random number
+volatile uint8_t currentshiftcounter = 0; //random number
 
 volatile uint32_t cancounter = 0;
 
@@ -118,6 +122,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   HAL_UART_Receive_IT(&huart1, &onebyte, 1);
 }
 
+
+
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs) {
 
   cancounter += 1;
@@ -128,27 +134,22 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 
     HAL_FDCAN_GetRxMessage(&hfdcan1, FDCAN_RX_FIFO0, &tempHeader, tempData);
 
-    uint8_t importantframe = 0;
-    if (tempHeader.Identifier == 10) {
-      shiftbool = 1;
-      shift_direction = tempData[0];
+    switch (tempHeader.Identifier) {
+      case SHIFT_CAN_FRAME: 
+        shift_direction = tempData[0];
+        shiftcounter = tempData[1];
+        return;
+        break;
+      default:
+        break;
     }
 
-    if (importantframe) {
-      uint8_t nextimportant = (importantcanqueue.head + 1) % CAN_QUEUE_SIZE;
-      if (nextimportant != importantcanqueue.tail) {
-        importantcanqueue.messagequeue[nextimportant].rxheader = tempHeader;
-        memcpy(importantcanqueue.messagequeue[nextimportant].canrxdata, tempData, sizeof(tempData));
-        importantcanqueue.head = nextimportant;
-      }         
-    } else {
-      uint8_t next = (canqueue.head + 1) % CAN_QUEUE_SIZE; 
-      if (next != canqueue.tail) {
-        canqueue.messagequeue[next].rxheader = tempHeader;
-        memcpy(canqueue.messagequeue[next].canrxdata, tempData, sizeof(tempData));
-        canqueue.head = next;
-      }   
-    }
+    uint8_t next = (canqueue.head + 1) % CAN_QUEUE_SIZE; 
+    if (next != canqueue.tail) {
+      canqueue.messagequeue[next].rxheader = tempHeader;
+      memcpy(canqueue.messagequeue[next].canrxdata, tempData, sizeof(tempData));
+      canqueue.head = next;
+    }   
   }
 }
 
@@ -301,16 +302,29 @@ HAL_StatusTypeDef sendshiftacknowledgement(int uniqueid) {
   add_message_to_queue(&txheader6, ackframe);
 }
 
+
 void doshift() {
+
+  if (shiftcounter == currentshiftcounter) {
+    return;
+  } else {
+    currentshiftcounter = shiftcounter;
+    customprint("doing a shift\n");
+  }
+  
   switch (shift_direction) {
     case 1:
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
       HAL_Delay(150);
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
       break;
     case 2:
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
       HAL_Delay(150);
+      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
       break;
     default:
@@ -416,12 +430,12 @@ int main(void)
   HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
   HAL_Delay(40);
   HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
-  HAL_Delay(40);
+  HAL_Delay(90);
   HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
 
 
   txheader6.Identifier = 50;
-  txheader6.IdType = FDCAN_EXTENDED_ID;
+  txheader6.IdType = FDCAN_STANDARD_ID;
   txheader6.TxFrameType = FDCAN_DATA_FRAME;
   txheader6.DataLength = FDCAN_DLC_BYTES_8;
   txheader6.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
@@ -432,7 +446,7 @@ int main(void)
   uint16_t cantxdata[4] = {400, 500, 600, 700};
 
   
-  canfilter.IdType = FDCAN_EXTENDED_ID;
+  canfilter.IdType = FDCAN_STANDARD_ID;
   canfilter.FilterIndex = 0;
   canfilter.FilterType = FDCAN_FILTER_MASK;
   canfilter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
@@ -464,7 +478,7 @@ int main(void)
 
   FDCAN_TxHeaderTypeDef txheader2;
   txheader2.Identifier = 50;
-  txheader2.IdType = FDCAN_EXTENDED_ID;
+  txheader2.IdType = FDCAN_STANDARD_ID;
   txheader2.TxFrameType = FDCAN_DATA_FRAME;
   txheader2.DataLength = FDCAN_DLC_BYTES_8;
   txheader2.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
@@ -490,12 +504,9 @@ int main(void)
       translate_and_send_sensor_values = 0;
     }
       */
+      
+    doshift();
 
-    if (shiftbool) {
-      customprint("did a shift\n");
-      doshift();
-      shiftbool = 0;
-    }
 
     if (canqueue.tail != canqueue.head) { //dequeue from normal queue
 
@@ -520,6 +531,8 @@ int main(void)
         case 213:
           gearpositionsensor = ((uint16_t *)(canqueue.messagequeue[canqueue.tail].canrxdata))[1];
         default:
+          char otherbuffer[40] = {0};
+          sprintf(otherbuffer, "misc message from : %u\n", identifier);
           break;
       }
 
@@ -670,7 +683,7 @@ int main(void)
       if (!strcmp(intbuffer, "shift")) {
         int receivedbytes = getcommand((uint8_t *)buffer, 40);
         if (!strcmp(buffer, "down")) {
-          shiftbool = 1;
+          shiftcounter++;
           shift_direction = 2;
           /*
           HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET); //upshift  
@@ -680,7 +693,7 @@ int main(void)
           */
           
         } else if (!strcmp(buffer, "up")) {
-          shiftbool = 1;
+          shiftcounter++;
           shift_direction = 1;
           /*
           HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET); //downshift
@@ -761,7 +774,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSE;
   RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV4;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
   {
