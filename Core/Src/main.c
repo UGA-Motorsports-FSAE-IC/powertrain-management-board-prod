@@ -273,15 +273,6 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef *htim) {
     }
   }
 }
-
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
-  if (htim->Instance == TIM17) { //40ms timer for starting shifter pneumatic piston actuation after throttle blip start
-    do_start_piston_actuation = 1;
-  }
-  if (htim->Instance == TIM14) { //200ms timer for canceling the throttle blip if shift still hasn't completed
-    maximum_shift_time_passed = 1;
-  }
-}
 */
 
 void customprint(const char * toprint) {
@@ -289,7 +280,13 @@ void customprint(const char * toprint) {
   HAL_UART_Transmit(&huart1, (uint8_t *)toprint, strlen(toprint), 100);
 }
 
+
+static FDCAN_TxHeaderTypeDef shiftcutheader;
+static uint8_t shiftcutdata[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+
 int sendshiftcut() {
+  add_message_to_queue(&shiftcutheader, shiftcutdata);
+
   return 0;
 }
 
@@ -303,6 +300,8 @@ HAL_StatusTypeDef sendshiftacknowledgement(int uniqueid) {
 }
 
 
+volatile uint8_t solenoid_time_elapsed = 0;
+
 void doshift() {
 
   if (shiftcounter == currentshiftcounter) {
@@ -311,25 +310,28 @@ void doshift() {
     currentshiftcounter = shiftcounter;
     customprint("doing a shift\n");
   }
-  
+
+  HAL_TIM_Base_Start_IT(&htim17);
+
   switch (shift_direction) {
     case 1:
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);
-      HAL_Delay(150);
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET);\
       break;
     case 2:
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
+      sendshiftcut();
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_SET);
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_SET);
-      HAL_Delay(150);
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
       break;
     default:
       customprint("error with direction\n");
       break;
+  }
+}
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+  if (htim->Instance == TIM17) {
+    solenoid_time_elapsed = 1;
   }
 }
 
@@ -425,7 +427,7 @@ int main(void)
   //HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_3);
   //HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_4);
   //HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_5);
-  HAL_TIM_Base_Start_IT(&htim17);
+  //HAL_TIM_Base_Start_IT(&htim17);
   
   HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
   HAL_Delay(40);
@@ -433,6 +435,14 @@ int main(void)
   HAL_Delay(90);
   HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_9);
 
+  shiftcutheader.Identifier = 120;
+  shiftcutheader.IdType = FDCAN_STANDARD_ID;
+  shiftcutheader.TxFrameType = FDCAN_DATA_FRAME;
+  shiftcutheader.DataLength = FDCAN_DLC_BYTES_8;
+  shiftcutheader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+  shiftcutheader.BitRateSwitch = FDCAN_BRS_OFF;
+  shiftcutheader.FDFormat = FDCAN_CLASSIC_CAN;
+  shiftcutheader.MessageMarker = 0;  
 
   txheader6.Identifier = 50;
   txheader6.IdType = FDCAN_STANDARD_ID;
@@ -506,6 +516,13 @@ int main(void)
       */
       
     doshift();
+    if (solenoid_time_elapsed) {
+      HAL_TIM_Base_Stop_IT(&htim17);
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_9, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET);
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_6, GPIO_PIN_RESET);
+      solenoid_time_elapsed = 0;
+    }
 
 
     if (canqueue.tail != canqueue.head) { //dequeue from normal queue
@@ -841,7 +858,7 @@ static void MX_TIM17_Init(void)
 
   /* USER CODE END TIM17_Init 1 */
   htim17.Instance = TIM17;
-  htim17.Init.Prescaler = 7;
+  htim17.Init.Prescaler = 73;
   htim17.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim17.Init.Period = 65535;
   htim17.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
